@@ -1,0 +1,122 @@
+name: Nexus 6.1 Validation
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  validate-release:
+    name: Release validation (gcc-${{matrix.gcc}}, ${{matrix.arch}})
+    runs-on: ${{matrix.os}}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            gcc: 11
+            arch: avx2
+          - os: ubuntu-22.04
+            gcc: 12
+            arch: avx2
+          - os: ubuntu-22.04
+            gcc: 12
+            arch: x86-64
+    steps:
+    - name: Set up GCC ${{matrix.gcc}}
+      uses: egor-tensin/setup-gcc@v1
+      with:
+        version: ${{matrix.gcc}}
+        platform: x64
+
+    - name: Clone Nexus 6.1
+      uses: actions/checkout@v3
+
+    - name: Build (release, ${{matrix.arch}})
+      run: cd src && make build CC=gcc ARCH=${{matrix.arch}}
+
+    - name: Build info
+      run: ./src/nexus6.1 buildinfo
+
+    - name: Bench regression (must be 2,811,728 nodes)
+      run: |
+        out=$(./src/nexus6.1 bench)
+        echo "$out"
+        nodes=$(echo "$out" | grep 'Results:' | grep -oE '[0-9]+ nodes' | awk '{print $1}')
+        if [ "$nodes" != "2811728" ]; then
+          echo "BENCH REGRESSION: got $nodes, expected 2811728"
+          exit 1
+        fi
+        echo "Bench OK ($nodes nodes)"
+
+    - name: Install expect
+      run: sudo apt-get update && sudo apt-get install -y expect
+
+    - name: Run validation gate
+      run: bash scripts/validate.sh release
+
+  validate-profile:
+    name: Profile build validation
+    runs-on: ubuntu-22.04
+    steps:
+    - name: Set up GCC
+      uses: egor-tensin/setup-gcc@v1
+      with:
+        version: 12
+        platform: x64
+
+    - name: Clone Nexus 6.1
+      uses: actions/checkout@v3
+
+    - name: Build (profile)
+      run: cd src && make profile CC=gcc ARCH=avx2
+
+    - name: Verify instrumentation is active
+      run: |
+        ./src/nexus6.1 buildinfo | grep -q 'NEXUS_PROFILE  : enabled'
+        ./src/nexus6.1 buildinfo | grep -q 'NEXUS_SUMMARY  : enabled'
+
+    - name: Run benchdetail (extended metrics)
+      run: |
+        out=$(./src/nexus6.1 benchdetail)
+        echo "$out" | head -10
+        echo "$out" | grep -q 'tt_probes'
+        echo "$out" | grep -q 'qsearch_nodes'
+        echo "$out" | tail -3
+
+    - name: Verify explain mode
+      run: |
+        out=$(printf 'uci\nsetoption name ExplainMode value true\nposition startpos\ngo depth 6\nquit\n' | ./src/nexus6.1)
+        echo "$out" | grep -q 'info string explain begin'
+        echo "$out" | grep -q 'info string explain final_depth'
+
+  validate-debug:
+    name: Debug build (ASan/UBSan) validation
+    runs-on: ubuntu-22.22.04
+    continue-on-error: true
+    steps:
+    - name: Set up GCC
+      uses: egor-tensin/setup-gcc@v1
+      with:
+        version: 12
+        platform: x64
+
+    - name: Clone Nexus 6.1
+      uses: actions/checkout@v3
+
+    - name: Build (debug, ASan/UBSan)
+      run: cd src && make debug CC=gcc ARCH=avx2
+
+    - name: Run short search under ASan
+      run: |
+        out=$( (printf 'uci\nposition startpos\ngo depth 6\n'; sleep 5; printf 'quit\n') | ./src/nexus6.1 )
+        echo "$out" | grep -q 'bestmove'
+        ! echo "$out" | grep -qiE '(ASAN|runtime error|ERROR: AddressSanitizer)'
+
+  clang-format-checking:
+    name: Code formatting check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - uses: RafikFarhad/clang-format-github-action@v2.1.0
+        with:
+          sources: 'src/*.c,src/*.h'
