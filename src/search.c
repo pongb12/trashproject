@@ -223,6 +223,12 @@ void MainSearch() {
     printf(" ponder %s", MoveToStr(ponderMove, board));
   printf("\n");
 
+  // WASM: clear searching flag (normally done by ThreadWaitUntilSleep)
+#ifdef __EMSCRIPTEN__
+  Threads.searching = 0;
+  Threads.sleeping = 1;
+#endif
+
 #if defined(NEXUS_SUMMARY)
   // Finalize the search summary with timing data so the explain output is honest.
   NexusSummaryFinalize(Limits.alloc, (int)(GetTimeMS() - Limits.start));

@@ -317,6 +317,9 @@ void UCILoop() {
   static Board board;
   ParseFen(START_FEN, &board);
 
+  // Free previous allocations (UCILoop may be called multiple times)
+  if (board.accumulators) AlignedFree(board.accumulators);
+  if (board.refreshTable) AlignedFree(board.refreshTable);
   // Allocate accumulators and refreshTable for the UCI board
   // These are needed by MakeMoveUpdate and Evaluate
   board.accumulators = AlignedMalloc(sizeof(Accumulator) * (MAX_SEARCH_PLY + 1), 64);
@@ -525,6 +528,11 @@ int GetOptionIntValue(char* in) {
 // JS calls this to push UCI commands into the stdin buffer
 EMSCRIPTEN_KEEPALIVE
 int nexus_push_command(const char* cmd) {
+  // If buffer was fully consumed, reset for new batch
+  if (stdin_buffer_pos >= stdin_buffer_len) {
+    stdin_buffer_pos = 0;
+    stdin_buffer_len = 0;
+  }
   int len = strlen(cmd);
   if (stdin_buffer_len + len + 1 >= 65536) return 0;
   strcpy(stdin_buffer + stdin_buffer_len, cmd);
