@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # Nexus 6.1
 
 A UCI-compliant chess engine written in C, derived from the **Berserk** engine
@@ -629,3 +630,7 @@ probing, INCBIN utility) is consolidated in [`ATTRIBUTION.md`](./ATTRIBUTION.md)
 **Author:** Nexus Team  
 **Version:** 6.0.0  
 **Year:** 2026
+=======
+# trashproject
+Chess engine base Berserk
+>>>>>>> 5d723e94439a8863e0dea1ecda2c0cb8f7804fd0
