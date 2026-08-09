@@ -217,6 +217,9 @@ INLINE void InitRootMove(RootMove* rm, Move move) {
 
 void SetupMainThread(Board* board) {
   ThreadData* mainThread = Threads.threads[0];
+  // Ensure idx is 0 for the main thread — MainSearch's bestThread swap can
+  // corrupt it in edge cases, causing depth limit checks to fail.
+  mainThread->idx        = 0;
   mainThread->calls      = Limits.hitrate;
   mainThread->nodes      = 0;
   mainThread->tbhits     = 0;

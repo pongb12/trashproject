@@ -315,15 +315,19 @@ void UCILoop() {
 
   // Use static Board to avoid stack overflow (Board is ~35KB)
   static Board board;
+  // Allocate accumulators/refreshTable ONCE — never free between UCILoop calls.
+  // Freeing/re-allocating every call causes use-after-free when Search() sets
+  // board->accumulators = thread->accumulators, then UCILoop frees the wrong ptr.
+  static int allocInitialized = 0;
+  if (!allocInitialized) {
+    board.accumulators = AlignedMalloc(sizeof(Accumulator) * (MAX_SEARCH_PLY + 1), 64);
+    board.refreshTable = AlignedMalloc(sizeof(AccumulatorKingState) * 2 * 2 * N_KING_BUCKETS, 64);
+    allocInitialized = 1;
+  }
+
   ParseFen(START_FEN, &board);
 
-  // Free previous allocations (UCILoop may be called multiple times)
-  if (board.accumulators) AlignedFree(board.accumulators);
-  if (board.refreshTable) AlignedFree(board.refreshTable);
-  // Allocate accumulators and refreshTable for the UCI board
-  // These are needed by MakeMoveUpdate and Evaluate
-  board.accumulators = AlignedMalloc(sizeof(Accumulator) * (MAX_SEARCH_PLY + 1), 64);
-  board.refreshTable = AlignedMalloc(sizeof(AccumulatorKingState) * 2 * 2 * N_KING_BUCKETS, 64);
+  // Reset accumulator/refreshTable state (but keep the same allocation)
   board.accumulators->correct[WHITE] = board.accumulators->correct[BLACK] = 0;
   ResetRefreshTable(board.refreshTable);
 
