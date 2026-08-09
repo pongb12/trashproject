@@ -20,7 +20,9 @@ FLAGS+=" "  # suppress all warnings for cleaner build
 
 # Emscripten linker flags
 EMFLAGS="-s ENVIRONMENT=web,worker,node"
-EMFLAGS+=" -s MODULARIZE=1 -s EXPORT_ES6=1"
+# Export UMD (NOT ES6) — importScripts() in classic worker doesn't support import.meta/export
+# With MODULARIZE=1 + EXPORT_ES6=0: creates global `createNexusModule` function via UMD
+EMFLAGS+=" -s MODULARIZE=1 -s EXPORT_ES6=0"
 EMFLAGS+=" -s EXPORT_NAME=createNexusModule"
 EMFLAGS+=" -s EXPORTED_RUNTIME_METHODS=['ccall','cwrap','UTF8ToString','stringToUTF8','lengthBytesUTF8']"
 EMFLAGS+=" -s EXPORTED_FUNCTIONS=['_main','_malloc','_free','_nexus_push_command','_nexus_run_uci']"
