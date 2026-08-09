@@ -146,24 +146,17 @@ void* ThreadInit(void* arg) {
   pthread_cond_signal(&Threads.sleep);
   pthread_mutex_unlock(&Threads.mutex);
 
-  ThreadIdle(thread);
+  // In WASM, ThreadIdle is not needed — search runs directly
+  // ThreadIdle(thread);
 
   return NULL;
 }
 
 // Create a thread with idx i
 void ThreadCreate(int i) {
-  pthread_t thread;
-
   Threads.init = 1;
-  pthread_mutex_lock(&Threads.mutex);
-  pthread_create(&thread, NULL, ThreadInit, (void*) (intptr_t) i);
-
-  while (Threads.init)
-    pthread_cond_wait(&Threads.sleep, &Threads.mutex);
-  pthread_mutex_unlock(&Threads.mutex);
-
-  Threads.threads[i]->nativeThread = thread;
+  ThreadInit((void*) (intptr_t) i);
+  Threads.threads[i]->nativeThread = 0;
 }
 
 // Teardown and free a thread

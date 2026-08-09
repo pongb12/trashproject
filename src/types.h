@@ -19,7 +19,14 @@
 
 #include <inttypes.h>
 #include <limits.h>
+
+#ifdef __EMSCRIPTEN__
+// WASM: Emscripten provides pthread.h with real types but as stubs
+// Just include it — the functions are no-ops in single-threaded mode
 #include <pthread.h>
+#else
+#include <pthread.h>
+#endif
 #include <setjmp.h>
 #include <stdatomic.h>
 

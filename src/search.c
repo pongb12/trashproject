@@ -108,7 +108,11 @@ void StartSearch(Board* board, uint8_t ponder) {
   SetupOtherThreads(board);
 
   Threads.searching = 1;
+#ifdef __EMSCRIPTEN__
+  MainSearch();
+#else
   ThreadWake(Threads.threads[0], THREAD_SEARCH);
+#endif
 }
 
 void MainSearch() {
@@ -201,7 +205,8 @@ void MainSearch() {
     // Pull ponder move from the TT if PV doesn't have one.
     // We reload the startfen because jmp aborts don't guarantee a rolled back board
     ParseFen(startFen, board);
-
+    board->accumulators = mainThread->accumulators;
+    board->accumulators->correct[WHITE] = board->accumulators->correct[BLACK] = 0;
     MakeMove(bestMove, board);
     int ttHit = 0, ttScore, ttEval, ttDepth, ttBound, ttPv = 0;
     TTProbe(board->zobrist, 0, &ttHit, &ponderMove, &ttScore, &ttEval, &ttDepth, &ttBound, &ttPv);
@@ -241,7 +246,8 @@ void Search(ThreadData* thread) {
   int mainThread = !thread->idx;
 
   thread->depth       = 0;
-  board->accumulators = thread->accumulators; // exit jumps can cause this pointer to not be reset
+  board->accumulators = thread->accumulators;
+  board->refreshTable  = thread->refreshTable;
   ResetAccumulator(board->accumulators, board, WHITE);
   ResetAccumulator(board->accumulators, board, BLACK);
   SetContempt(thread->contempt, board->stm);
@@ -264,11 +270,8 @@ void Search(ThreadData* thread) {
   }
 
   while (++thread->depth < MAX_SEARCH_PLY) {
-#if defined(_WIN32) || defined(_WIN64)
-    if (_setjmp(thread->exit, NULL)) {
-#else
-    if (setjmp(thread->exit)) {
-#endif
+// WASM: no setjmp needed, longjmp replaced with return
+    if (0) {
       break;
     }
 
@@ -447,7 +450,7 @@ int Negamax(int alpha, int beta, int depth, int cutnode, ThreadData* thread, PV*
 
   if (LoadRlx(Threads.stop) || (!thread->idx && CheckLimits(thread)))
     // hot exit
-    longjmp(thread->exit, 1);
+    return 0; // WASM: return instead of longjmp
 
   if (isPV && thread->seldepth < ss->ply + 1)
     thread->seldepth = ss->ply + 1;
@@ -947,7 +950,7 @@ int Quiesce(int alpha, int beta, int depth, ThreadData* thread, SearchStack* ss)
 
   if (LoadRlx(Threads.stop) || (!thread->idx && CheckLimits(thread)))
     // hot exit
-    longjmp(thread->exit, 1);
+    return 0; // WASM: return instead of longjmp
 
   // draw check
   if (IsDraw(board, ss->ply))

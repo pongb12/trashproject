@@ -50,6 +50,7 @@ size_t TTInit(int mb) {
 #endif
 
   TT.mem = AlignedMalloc(size, alignment);
+  if (!TT.mem) { printf("info string TT: Failed to allocate %llu bytes\n", (unsigned long long)size); return 0; }
 
 #if defined(MADV_HUGEPAGE)
   madvise(TT.mem, size, MADV_HUGEPAGE);
@@ -91,9 +92,8 @@ inline void TTUpdate() {
 
 inline uint64_t TTIdx(uint64_t hash) {
 #ifdef __EMSCRIPTEN__
-  // WASM doesn't support __int128 efficiently — use 64-bit multiply
-  // (slightly less uniform but good enough for hash table indexing)
-  return (hash * (uint64_t)TT.count) >> 32;
+  // WASM: use modulo (simple and correct, no overflow issues)
+  return hash % TT.count;
 #else
   return ((unsigned __int128) hash * (unsigned __int128) TT.count) >> 64;
 #endif
