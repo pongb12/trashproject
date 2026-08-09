@@ -90,7 +90,13 @@ inline void TTUpdate() {
 }
 
 inline uint64_t TTIdx(uint64_t hash) {
+#ifdef __EMSCRIPTEN__
+  // WASM doesn't support __int128 efficiently — use 64-bit multiply
+  // (slightly less uniform but good enough for hash table indexing)
+  return (hash * (uint64_t)TT.count) >> 32;
+#else
   return ((unsigned __int128) hash * (unsigned __int128) TT.count) >> 64;
+#endif
 }
 
 inline void TTPrefetch(uint64_t hash) {

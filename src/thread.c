@@ -16,7 +16,9 @@
 
 #include "thread.h"
 
+#ifndef __EMSCRIPTEN__
 #include <pthread.h>
+#endif
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -37,6 +39,10 @@ ThreadPool Threads;
 
 // Block until requested thread is sleeping
 void ThreadWaitUntilSleep(ThreadData* thread) {
+#ifdef __EMSCRIPTEN__
+  (void)thread;
+  Threads.searching = 0;
+#else
   pthread_mutex_lock(&thread->mutex);
 
   while (thread->action != THREAD_SLEEP)
@@ -46,20 +52,28 @@ void ThreadWaitUntilSleep(ThreadData* thread) {
 
   if (thread->idx == 0)
     Threads.searching = 0;
+#endif
 }
 
 // Block thread until on condition
 void ThreadWait(ThreadData* thread, atomic_uchar* cond) {
+#ifdef __EMSCRIPTEN__
+  (void)thread; (void)cond;
+#else
   pthread_mutex_lock(&thread->mutex);
 
   while (!atomic_load(cond))
     pthread_cond_wait(&thread->sleep, &thread->mutex);
 
   pthread_mutex_unlock(&thread->mutex);
+#endif
 }
 
 // Wake a thread up with an action
 void ThreadWake(ThreadData* thread, int action) {
+#ifdef __EMSCRIPTEN__
+  (void)thread; (void)action;
+#else
   pthread_mutex_lock(&thread->mutex);
 
   if (action != THREAD_RESUME)
@@ -67,6 +81,7 @@ void ThreadWake(ThreadData* thread, int action) {
 
   pthread_cond_signal(&thread->sleep);
   pthread_mutex_unlock(&thread->mutex);
+#endif
 }
 
 // Idle loop that wakes into an action
@@ -270,3 +285,5 @@ uint64_t TBHits() {
 
   return tbhits;
 }
+
+// WASM stubs already inlined above via #ifdef __EMSCRIPTEN__

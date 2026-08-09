@@ -87,7 +87,19 @@
 
 /* Unknown */
 #if !__ENDIAN_DEFINED
+#ifdef __EMSCRIPTEN__
+// WASM is little-endian
+#define BYTE_ORDER 1234
+#define LITTLE_ENDIAN 1234
+#define BIG_ENDIAN 4321
+#define __BSWAP_DEFINED 1
+#define __ENDIAN_DEFINED 1
+// Emscripten provides __builtin_bswap16/32
+#define bswap16(x) __builtin_bswap16(x)
+#define bswap32(x) __builtin_bswap32(x)
+#else
 #error Could not determine CPU byte order
+#endif
 #endif
 
 /* POSIX - http://austingroupbugs.net/view.php?id=162 */
