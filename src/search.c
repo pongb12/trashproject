@@ -108,11 +108,7 @@ void StartSearch(Board* board, uint8_t ponder) {
   SetupOtherThreads(board);
 
   Threads.searching = 1;
-#ifdef __EMSCRIPTEN__
-  MainSearch();
-#else
   ThreadWake(Threads.threads[0], THREAD_SEARCH);
-#endif
 }
 
 void MainSearch() {
@@ -205,7 +201,7 @@ void MainSearch() {
     // Pull ponder move from the TT if PV doesn't have one.
     // We reload the startfen because jmp aborts don't guarantee a rolled back board
     ParseFen(startFen, board);
-    board->accumulators = mainThread->accumulators;
+
     board->accumulators->correct[WHITE] = board->accumulators->correct[BLACK] = 0;
     MakeMove(bestMove, board);
     int ttHit = 0, ttScore, ttEval, ttDepth, ttBound, ttPv = 0;
@@ -222,12 +218,6 @@ void MainSearch() {
   if (ponderMove)
     printf(" ponder %s", MoveToStr(ponderMove, board));
   printf("\n");
-
-  // WASM: clear searching flag (normally done by ThreadWaitUntilSleep)
-#ifdef __EMSCRIPTEN__
-  Threads.searching = 0;
-  Threads.sleeping = 1;
-#endif
 
 #if defined(NEXUS_SUMMARY)
   // Finalize the search summary with timing data so the explain output is honest.
@@ -252,8 +242,8 @@ void Search(ThreadData* thread) {
   int mainThread = !thread->idx;
 
   thread->depth       = 0;
-  board->accumulators = thread->accumulators;
-  board->refreshTable  = thread->refreshTable;
+  board->accumulators = thread->accumulators; // exit jumps can cause this pointer to not be reset
+  board->refreshTable = thread->refreshTable;
   ResetAccumulator(board->accumulators, board, WHITE);
   ResetAccumulator(board->accumulators, board, BLACK);
   SetContempt(thread->contempt, board->stm);
@@ -276,8 +266,11 @@ void Search(ThreadData* thread) {
   }
 
   while (++thread->depth < MAX_SEARCH_PLY) {
-// WASM: no setjmp needed, longjmp replaced with return
-    if (0) {
+#if defined(_WIN32) || defined(_WIN64)
+    if (_setjmp(thread->exit, NULL)) {
+#else
+    if (setjmp(thread->exit)) {
+#endif
       break;
     }
 
@@ -456,7 +449,7 @@ int Negamax(int alpha, int beta, int depth, int cutnode, ThreadData* thread, PV*
 
   if (LoadRlx(Threads.stop) || (!thread->idx && CheckLimits(thread)))
     // hot exit
-    return 0; // WASM: return instead of longjmp
+    longjmp(thread->exit, 1);
 
   if (isPV && thread->seldepth < ss->ply + 1)
     thread->seldepth = ss->ply + 1;
@@ -956,7 +949,7 @@ int Quiesce(int alpha, int beta, int depth, ThreadData* thread, SearchStack* ss)
 
   if (LoadRlx(Threads.stop) || (!thread->idx && CheckLimits(thread)))
     // hot exit
-    return 0; // WASM: return instead of longjmp
+    longjmp(thread->exit, 1);
 
   // draw check
   if (IsDraw(board, ss->ply))

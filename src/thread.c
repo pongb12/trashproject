@@ -16,9 +16,7 @@
 
 #include "thread.h"
 
-#ifndef __EMSCRIPTEN__
 #include <pthread.h>
-#endif
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -39,10 +37,6 @@ ThreadPool Threads;
 
 // Block until requested thread is sleeping
 void ThreadWaitUntilSleep(ThreadData* thread) {
-#ifdef __EMSCRIPTEN__
-  (void)thread;
-  Threads.searching = 0;
-#else
   pthread_mutex_lock(&thread->mutex);
 
   while (thread->action != THREAD_SLEEP)
@@ -52,28 +46,20 @@ void ThreadWaitUntilSleep(ThreadData* thread) {
 
   if (thread->idx == 0)
     Threads.searching = 0;
-#endif
 }
 
 // Block thread until on condition
 void ThreadWait(ThreadData* thread, atomic_uchar* cond) {
-#ifdef __EMSCRIPTEN__
-  (void)thread; (void)cond;
-#else
   pthread_mutex_lock(&thread->mutex);
 
   while (!atomic_load(cond))
     pthread_cond_wait(&thread->sleep, &thread->mutex);
 
   pthread_mutex_unlock(&thread->mutex);
-#endif
 }
 
 // Wake a thread up with an action
 void ThreadWake(ThreadData* thread, int action) {
-#ifdef __EMSCRIPTEN__
-  (void)thread; (void)action;
-#else
   pthread_mutex_lock(&thread->mutex);
 
   if (action != THREAD_RESUME)
@@ -81,7 +67,6 @@ void ThreadWake(ThreadData* thread, int action) {
 
   pthread_cond_signal(&thread->sleep);
   pthread_mutex_unlock(&thread->mutex);
-#endif
 }
 
 // Idle loop that wakes into an action
@@ -146,17 +131,24 @@ void* ThreadInit(void* arg) {
   pthread_cond_signal(&Threads.sleep);
   pthread_mutex_unlock(&Threads.mutex);
 
-  // In WASM, ThreadIdle is not needed — search runs directly
-  // ThreadIdle(thread);
+  ThreadIdle(thread);
 
   return NULL;
 }
 
 // Create a thread with idx i
 void ThreadCreate(int i) {
+  pthread_t thread;
+
   Threads.init = 1;
-  ThreadInit((void*) (intptr_t) i);
-  Threads.threads[i]->nativeThread = 0;
+  pthread_mutex_lock(&Threads.mutex);
+  pthread_create(&thread, NULL, ThreadInit, (void*) (intptr_t) i);
+
+  while (Threads.init)
+    pthread_cond_wait(&Threads.sleep, &Threads.mutex);
+  pthread_mutex_unlock(&Threads.mutex);
+
+  Threads.threads[i]->nativeThread = thread;
 }
 
 // Teardown and free a thread
@@ -193,12 +185,14 @@ void ThreadsExit() {
 
   pthread_cond_destroy(&Threads.sleep);
   pthread_mutex_destroy(&Threads.mutex);
+  pthread_mutex_destroy(&Threads.lock);
 }
 
 // Start
 void ThreadsInit() {
   pthread_mutex_init(&Threads.mutex, NULL);
   pthread_cond_init(&Threads.sleep, NULL);
+  pthread_mutex_init(&Threads.lock, NULL);
 
   Threads.count = 1;
   ThreadCreate(0);
@@ -281,5 +275,3 @@ uint64_t TBHits() {
 
   return tbhits;
 }
-
-// WASM stubs already inlined above via #ifdef __EMSCRIPTEN__

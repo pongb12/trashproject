@@ -79,7 +79,13 @@ int main(int argc, char** argv) {
     printf("  make profile   - O2 + profile counters + summary (for hotspot analysis)\n");
     printf("  make debug     - O0 + all instrumentation + ASan/UBSan (for development)\n");
   } else {
+#ifdef __EMSCRIPTEN__
+    // WASM: the JS bridge (nexus_init / nexus_push_command / nexus_pump) drives
+    // the engine. main() must not block in UCILoop()'s fgets loop.
+    return 0;
+#else
     UCILoop();
+#endif
   }
 
   return 0;

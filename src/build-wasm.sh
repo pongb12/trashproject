@@ -1,6 +1,8 @@
 #!/bin/bash
 # Build Nexus 6.1 as WebAssembly for browser use
-# Single-threaded with proper pthread stubs and setjmp support
+# Pthread-based: the engine's search threads (thread.c uses real pthreads) run on
+# Emscripten pthread workers. Requires SharedArrayBuffer, so the page must be
+# served with COOP/COEP headers (crossOriginIsolated) — see nexus-worker.js.
 #
 # Optimizations vs previous build:
 # - Remove --embed-file (network is fetched separately with progress bar)
@@ -29,7 +31,8 @@ EMFLAGS="-s ENVIRONMENT=web,worker,node"
 EMFLAGS+=" -s MODULARIZE=1 -s EXPORT_ES6=0"
 EMFLAGS+=" -s EXPORT_NAME=createNexusModule"
 EMFLAGS+=" -s EXPORTED_RUNTIME_METHODS=['ccall','cwrap','UTF8ToString','stringToUTF8','lengthBytesUTF8','FS_createDataFile','FS_unlink','FS_stat','FS']"
-EMFLAGS+=" -s EXPORTED_FUNCTIONS=['_main','_malloc','_free','_nexus_push_command','_nexus_run_uci']"
+# Pump API (JS bridge) — nexus_run_uci was removed in the uci.c refactor
+EMFLAGS+=" -s EXPORTED_FUNCTIONS=['_main','_malloc','_free','_nexus_init','_nexus_push_command','_nexus_pump','_nexus_destroy']"
 EMFLAGS+=" -s ALLOW_MEMORY_GROWTH=1 -s INITIAL_MEMORY=512mb -s MAXIMUM_MEMORY=1024mb"
 EMFLAGS+=" -s FORCE_FILESYSTEM=1"
 # Removed: --embed-file $NETWORK  (network is now fetched separately with progress)
@@ -37,8 +40,12 @@ EMFLAGS+=" -s WASM=1"
 EMFLAGS+=" -s SINGLE_FILE=0"
 EMFLAGS+=" -s STACK_SIZE=32mb"
 EMFLAGS+=" -s SUPPORT_LONGJMP=emscripten"
+# Real threads: thread.c uses pthread_create/cond_wait unconditionally, so a
+# single-threaded build cannot search. main() must not auto-run either — it
+# would block in UCILoop()'s fgets loop. The worker calls nexus_init() instead.
+EMFLAGS+=" -pthread -sPTHREAD_POOL_SIZE=4 -sINVOKE_RUN=0"
 
-echo "Building Nexus 6.1 WASM (no embedded network)..."
+echo "Building Nexus 6.1 WASM (no embedded network, pthread search)..."
 echo "Sources: $SRC"
 echo ""
 
@@ -47,6 +54,7 @@ $EMCC $FLAGS $SRC $EMFLAGS -o ../nexus6.1.js
 echo ""
 echo "Build complete!"
 echo "Output: ../nexus6.1.js + ../nexus6.1.wasm (network NOT embedded — fetched separately)"
+echo "NOTE: requires SharedArrayBuffer — serve with COOP/COEP headers"
 ls -la ../nexus6.1.js ../nexus6.1.wasm 2>&1
 echo ""
 echo "Network file (must be deployed alongside):"
