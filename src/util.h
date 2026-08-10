@@ -34,14 +34,24 @@
 long GetTimeMS();
 
 INLINE void* AlignedMalloc(uint64_t size, const size_t on) {
+#ifdef __EMSCRIPTEN__
+  void* ptr = NULL;
+  if (posix_memalign(&ptr, on, size) != 0) return NULL;
+  return ptr;
+#else
   void* mem  = malloc(size + on + sizeof(void*));
   void** ptr = (void**) ((uintptr_t) (mem + on + sizeof(void*)) & ~(on - 1));
   ptr[-1]    = mem;
   return ptr;
+#endif
 }
 
 INLINE void AlignedFree(void* ptr) {
+#ifdef __EMSCRIPTEN__
+  free(ptr);
+#else
   free(((void**) ptr)[-1]);
+#endif
 }
 
 #endif

@@ -15,10 +15,14 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 #include "uci.h"
+#include <pthread.h>
+
+#ifdef __EMSCRIPTEN__
+#include <emscripten.h>
+#endif
 
 #include <limits.h>
 #include <math.h>
-#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -36,9 +40,20 @@
 #include "pyrrhic/tbprobe.h"
 #include "search.h"
 #include "see.h"
+#include "attacks.h"
+#include "bits.h"
+#include "random.h"
+#include "zobrist.h"
+#include "transposition.h"
 #include "thread.h"
 #include "transposition.h"
 #include "util.h"
+
+#ifdef __EMSCRIPTEN__
+char stdin_buffer[65536];
+int stdin_buffer_pos = 0;
+int stdin_buffer_len = 0;
+#endif
 
 #define START_FEN "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
 
@@ -276,21 +291,45 @@ void PrintUCIOptions() {
 }
 
 int ReadLine(char* in) {
+#ifdef __EMSCRIPTEN__
+  if (stdin_buffer_pos >= stdin_buffer_len)
+    return 0;
+  int i = 0;
+  while (stdin_buffer_pos < stdin_buffer_len && stdin_buffer[stdin_buffer_pos] != '\n' && i < 8191)
+    in[i++] = stdin_buffer[stdin_buffer_pos++];
+  if (stdin_buffer_pos < stdin_buffer_len) stdin_buffer_pos++;
+  in[i] = '\0';
+  return i > 0 ? 1 : 0;
+#else
   if (fgets(in, 8192, stdin) == NULL)
     return 0;
-
   size_t c = strcspn(in, "\r\n");
   if (c < strlen(in))
     in[c] = '\0';
-
   return 1;
+#endif
 }
 
 void UCILoop() {
   static char in[8192];
 
-  Board board;
+  // Use static Board to avoid stack overflow (Board is ~35KB)
+  static Board board;
+  // Allocate accumulators/refreshTable ONCE — never free between UCILoop calls.
+  // Freeing/re-allocating every call causes use-after-free when Search() sets
+  // board->accumulators = thread->accumulators, then UCILoop frees the wrong ptr.
+  static int allocInitialized = 0;
+  if (!allocInitialized) {
+    board.accumulators = AlignedMalloc(sizeof(Accumulator) * (MAX_SEARCH_PLY + 1), 64);
+    board.refreshTable = AlignedMalloc(sizeof(AccumulatorKingState) * 2 * 2 * N_KING_BUCKETS, 64);
+    allocInitialized = 1;
+  }
+
   ParseFen(START_FEN, &board);
+
+  // Reset accumulator/refreshTable state (but keep the same allocation)
+  board.accumulators->correct[WHITE] = board.accumulators->correct[BLACK] = 0;
+  ResetRefreshTable(board.refreshTable);
 
   setbuf(stdout, NULL);
 
@@ -477,8 +516,10 @@ void UCILoop() {
   if (Threads.searching)
     ThreadWaitUntilSleep(Threads.threads[0]);
 
-  pthread_mutex_destroy(&Threads.lock);
-  ThreadsExit();
+  // WASM: KHÔNG gọi ThreadsExit() ở cuối UCILoop — nó frees Threads.threads[0]
+  // và set Threads.count=0. Lần gọi UCILoop tiếp theo, NodesSearched() sẽ
+  // return 0 vì loop `for (i=0; i<0; i++)` → output 'nodes 0 nps 0' sai.
+  // ThreadsExit();
 }
 
 int GetOptionIntValue(char* in) {
@@ -487,3 +528,45 @@ int GetOptionIntValue(char* in) {
 
   return n;
 }
+
+
+#ifdef __EMSCRIPTEN__
+// JS calls this to push UCI commands into the stdin buffer
+EMSCRIPTEN_KEEPALIVE
+int nexus_push_command(const char* cmd) {
+  // If buffer was fully consumed, reset for new batch
+  if (stdin_buffer_pos >= stdin_buffer_len) {
+    stdin_buffer_pos = 0;
+    stdin_buffer_len = 0;
+  }
+  int len = strlen(cmd);
+  if (stdin_buffer_len + len + 1 >= 65536) return 0;
+  strcpy(stdin_buffer + stdin_buffer_len, cmd);
+  stdin_buffer_len += len;
+  if (stdin_buffer[stdin_buffer_len - 1] != '\n') {
+    stdin_buffer[stdin_buffer_len] = '\n';
+    stdin_buffer_len++;
+  }
+  return 1;
+}
+
+// JS calls this to start the UCI loop
+EMSCRIPTEN_KEEPALIVE
+int nexus_run_uci() {
+  // Initialize engine if not already done
+  static int initialized = 0;
+  if (!initialized) {
+    SeedRandom(0);
+    InitZobristKeys();
+    InitPruningAndReductionTables();
+    InitAttacks();
+    InitCuckoo();
+    LoadDefaultNN();
+    ThreadsInit();
+    TTInit(16);
+    initialized = 1;
+  }
+  UCILoop();
+  return 0;
+}
+#endif

@@ -16,7 +16,9 @@
 
 #include "thread.h"
 
+#ifndef __EMSCRIPTEN__
 #include <pthread.h>
+#endif
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -37,6 +39,10 @@ ThreadPool Threads;
 
 // Block until requested thread is sleeping
 void ThreadWaitUntilSleep(ThreadData* thread) {
+#ifdef __EMSCRIPTEN__
+  (void)thread;
+  Threads.searching = 0;
+#else
   pthread_mutex_lock(&thread->mutex);
 
   while (thread->action != THREAD_SLEEP)
@@ -46,20 +52,28 @@ void ThreadWaitUntilSleep(ThreadData* thread) {
 
   if (thread->idx == 0)
     Threads.searching = 0;
+#endif
 }
 
 // Block thread until on condition
 void ThreadWait(ThreadData* thread, atomic_uchar* cond) {
+#ifdef __EMSCRIPTEN__
+  (void)thread; (void)cond;
+#else
   pthread_mutex_lock(&thread->mutex);
 
   while (!atomic_load(cond))
     pthread_cond_wait(&thread->sleep, &thread->mutex);
 
   pthread_mutex_unlock(&thread->mutex);
+#endif
 }
 
 // Wake a thread up with an action
 void ThreadWake(ThreadData* thread, int action) {
+#ifdef __EMSCRIPTEN__
+  (void)thread; (void)action;
+#else
   pthread_mutex_lock(&thread->mutex);
 
   if (action != THREAD_RESUME)
@@ -67,6 +81,7 @@ void ThreadWake(ThreadData* thread, int action) {
 
   pthread_cond_signal(&thread->sleep);
   pthread_mutex_unlock(&thread->mutex);
+#endif
 }
 
 // Idle loop that wakes into an action
@@ -131,24 +146,17 @@ void* ThreadInit(void* arg) {
   pthread_cond_signal(&Threads.sleep);
   pthread_mutex_unlock(&Threads.mutex);
 
-  ThreadIdle(thread);
+  // In WASM, ThreadIdle is not needed — search runs directly
+  // ThreadIdle(thread);
 
   return NULL;
 }
 
 // Create a thread with idx i
 void ThreadCreate(int i) {
-  pthread_t thread;
-
   Threads.init = 1;
-  pthread_mutex_lock(&Threads.mutex);
-  pthread_create(&thread, NULL, ThreadInit, (void*) (intptr_t) i);
-
-  while (Threads.init)
-    pthread_cond_wait(&Threads.sleep, &Threads.mutex);
-  pthread_mutex_unlock(&Threads.mutex);
-
-  Threads.threads[i]->nativeThread = thread;
+  ThreadInit((void*) (intptr_t) i);
+  Threads.threads[i]->nativeThread = 0;
 }
 
 // Teardown and free a thread
@@ -209,6 +217,9 @@ INLINE void InitRootMove(RootMove* rm, Move move) {
 
 void SetupMainThread(Board* board) {
   ThreadData* mainThread = Threads.threads[0];
+  // Ensure idx is 0 for the main thread — MainSearch's bestThread swap can
+  // corrupt it in edge cases, causing depth limit checks to fail.
+  mainThread->idx        = 0;
   mainThread->calls      = Limits.hitrate;
   mainThread->nodes      = 0;
   mainThread->tbhits     = 0;
@@ -270,3 +281,5 @@ uint64_t TBHits() {
 
   return tbhits;
 }
+
+// WASM stubs already inlined above via #ifdef __EMSCRIPTEN__
