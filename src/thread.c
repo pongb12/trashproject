@@ -185,12 +185,14 @@ void ThreadsExit() {
 
   pthread_cond_destroy(&Threads.sleep);
   pthread_mutex_destroy(&Threads.mutex);
+  pthread_mutex_destroy(&Threads.lock);
 }
 
 // Start
 void ThreadsInit() {
   pthread_mutex_init(&Threads.mutex, NULL);
   pthread_cond_init(&Threads.sleep, NULL);
+  pthread_mutex_init(&Threads.lock, NULL);
 
   Threads.count = 1;
   ThreadCreate(0);
@@ -209,6 +211,9 @@ INLINE void InitRootMove(RootMove* rm, Move move) {
 
 void SetupMainThread(Board* board) {
   ThreadData* mainThread = Threads.threads[0];
+  // Ensure idx is 0 for the main thread — MainSearch's bestThread swap can
+  // corrupt it in edge cases, causing depth limit checks to fail.
+  mainThread->idx        = 0;
   mainThread->calls      = Limits.hitrate;
   mainThread->nodes      = 0;
   mainThread->tbhits     = 0;

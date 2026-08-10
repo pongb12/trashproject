@@ -202,6 +202,7 @@ void MainSearch() {
     // We reload the startfen because jmp aborts don't guarantee a rolled back board
     ParseFen(startFen, board);
 
+    board->accumulators->correct[WHITE] = board->accumulators->correct[BLACK] = 0;
     MakeMove(bestMove, board);
     int ttHit = 0, ttScore, ttEval, ttDepth, ttBound, ttPv = 0;
     TTProbe(board->zobrist, 0, &ttHit, &ponderMove, &ttScore, &ttEval, &ttDepth, &ttBound, &ttPv);
@@ -242,6 +243,7 @@ void Search(ThreadData* thread) {
 
   thread->depth       = 0;
   board->accumulators = thread->accumulators; // exit jumps can cause this pointer to not be reset
+  board->refreshTable = thread->refreshTable;
   ResetAccumulator(board->accumulators, board, WHITE);
   ResetAccumulator(board->accumulators, board, BLACK);
   SetContempt(thread->contempt, board->stm);

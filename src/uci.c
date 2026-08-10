@@ -15,10 +15,14 @@
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 #include "uci.h"
+#include <pthread.h>
+
+#ifdef __EMSCRIPTEN__
+#include <emscripten.h>
+#endif
 
 #include <limits.h>
 #include <math.h>
-#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -36,6 +40,11 @@
 #include "pyrrhic/tbprobe.h"
 #include "search.h"
 #include "see.h"
+#include "attacks.h"
+#include "bits.h"
+#include "random.h"
+#include "zobrist.h"
+#include "transposition.h"
 #include "thread.h"
 #include "transposition.h"
 #include "util.h"
@@ -286,199 +295,221 @@ int ReadLine(char* in) {
   return 1;
 }
 
+// Dispatch one UCI command line. Shared by the native UCILoop() and the
+// WASM JS bridge (nexus_pump()).
+static void HandleCommand(char* in, Board* board) {
+  if (in[0] == '\n')
+    return;
+
+  if (!strncmp(in, "isready", 7)) {
+    printf("readyok\n");
+  } else if (!strncmp(in, "position", 8)) {
+    ParsePosition(in, board);
+  } else if (!strncmp(in, "ucinewgame", 10)) {
+    ParsePosition("position startpos\n", board);
+    TTClear();
+    SearchClear();
+  } else if (!strncmp(in, "go", 2)) {
+    ParseGo(in, board);
+  } else if (!strncmp(in, "stop", 4)) {
+    if (Threads.searching) {
+      Threads.stop = 1;
+      pthread_mutex_lock(&Threads.lock);
+      if (Threads.sleeping)
+        ThreadWake(Threads.threads[0], THREAD_RESUME);
+      Threads.sleeping = 0;
+      pthread_mutex_unlock(&Threads.lock);
+    }
+  } else if (!strncmp(in, "quit", 4)) {
+    if (Threads.searching) {
+      Threads.stop = 1;
+      pthread_mutex_lock(&Threads.lock);
+      if (Threads.sleeping)
+        ThreadWake(Threads.threads[0], THREAD_RESUME);
+      Threads.sleeping = 0;
+      pthread_mutex_unlock(&Threads.lock);
+    }
+  } else if (!strncmp(in, "uci", 3)) {
+    PrintUCIOptions();
+  } else if (!strncmp(in, "ponderhit", 9)) {
+    Threads.ponder = 0;
+    if (Threads.stopOnPonderHit)
+      Threads.stop = 1;
+    pthread_mutex_lock(&Threads.lock);
+    if (Threads.sleeping) {
+      Threads.stop = 1;
+      ThreadWake(Threads.threads[0], THREAD_RESUME);
+      Threads.sleeping = 0;
+    }
+    pthread_mutex_unlock(&Threads.lock);
+  } else if (!strncmp(in, "board", 5)) {
+    PrintBoard(board);
+  } else if (!strncmp(in, "cycle", 5)) {
+    int cycle = HasCycle(board, MAX_SEARCH_PLY);
+    printf(cycle ? "yes\n" : "no\n");
+  } else if (!strncmp(in, "perft", 5)) {
+    strtok(in, " ");
+    char* d   = strtok(NULL, " ") ?: "5";
+    char* fen = strtok(NULL, "\0") ?: START_FEN;
+
+    int depth = atoi(d);
+    ParseFen(fen, board);
+
+    PerftTest(depth, board);
+  } else if (!strncmp(in, "bench", 5)) {
+    strtok(in, " ");
+    char* d = strtok(NULL, " ") ?: "13";
+
+    int depth = atoi(d);
+    Bench(depth);
+  } else if (!strncmp(in, "threats", 7)) {
+    PrintBB(board->threatened);
+  } else if (!strncmp(in, "eval", 4)) {
+    EvaluateTrace(board);
+  } else if (!strncmp(in, "see ", 4)) {
+    Move m = ParseMove(in + 4, board);
+    if (m)
+      printf("info string SEE result: %d\n", SEE(board, m, 0));
+    else
+      printf("info string Invalid move!\n");
+  } else if (!strncmp(in, "apply ", 6)) {
+    Move m = ParseMove(in + 6, board);
+    if (m) {
+      MakeMoveUpdate(m, board, 0);
+      PrintBoard(board);
+    } else
+      printf("info string Invalid move!\n");
+  } else if (!strncmp(in, "setoption name Hash value ", 26)) {
+    int mb                  = GetOptionIntValue(in);
+    mb                      = Max(2, Min(HASH_MAX, mb));
+    uint64_t bytesAllocated = TTInit(mb);
+    uint64_t totalEntries   = BUCKET_SIZE * bytesAllocated / sizeof(TTBucket);
+    printf("info string set Hash to value %d (%" PRIu64 " bytes) (%" PRIu64 " entries)\n",
+           mb,
+           bytesAllocated,
+           totalEntries);
+  } else if (!strncmp(in, "setoption name Threads value ", 29)) {
+    int n = GetOptionIntValue(in);
+    ThreadsSetNumber(Max(1, Min(2048, n)));
+    printf("info string set Threads to value %d\n", Threads.count);
+  } else if (!strncmp(in, "setoption name SyzygyPath value ", 32)) {
+    int success = tb_init(in + 32);
+    if (success)
+      printf("info string set SyzygyPath to value %s\n", in + 32);
+    else
+      printf("info string FAILED!\n");
+  } else if (!strncmp(in, "setoption name MultiPV value ", 29)) {
+    int n = GetOptionIntValue(in);
+
+    MULTI_PV = Max(1, Min(256, n));
+    printf("info string set MultiPV to value %d\n", MULTI_PV);
+  } else if (!strncmp(in, "setoption name Ponder value ", 28)) {
+    char opt[6];
+    sscanf(in, "%*s %*s %*s %*s %5s", opt);
+
+    PONDER_ENABLED = !strncmp(opt, "true", 4);
+    printf("info string set Ponder to value %s\n", PONDER_ENABLED ? "true" : "false");
+  } else if (!strncmp(in, "setoption name UCI_ShowWDL value ", 33)) {
+    char opt[6];
+    sscanf(in, "%*s %*s %*s %*s %5s", opt);
+
+    SHOW_WDL = !strncmp(opt, "true", 4);
+    printf("info string set SHOW_WDL to value %s\n", SHOW_WDL ? "true" : "false");
+  } else if (!strncmp(in, "setoption name UCI_Chess960 value ", 34)) {
+    char opt[6];
+    sscanf(in, "%*s %*s %*s %*s %5s", opt);
+
+    CHESS_960 = !strncmp(opt, "true", 4);
+    printf("info string set UCI_Chess960 to value %s\n", CHESS_960 ? "true" : "false");
+    printf("info string Resetting board...\n");
+
+    ParsePosition("position startpos\n", board);
+    TTClear();
+    SearchClear();
+  } else if (!strncmp(in, "setoption name MoveOverhead value ", 34)) {
+    MOVE_OVERHEAD = Min(10000, Max(0, GetOptionIntValue(in)));
+  } else if (!strncmp(in, "setoption name Contempt value ", 30)) {
+    CONTEMPT = Min(100, Max(-100, GetOptionIntValue(in)));
+  } else if (!strncmp(in, "setoption name EvalFile value ", 30)) {
+    char* path  = in + 30;
+    int success = 0;
+
+    if (strncmp(path, "<empty>", 7))
+      success = LoadNetwork(path);
+    else {
+      LoadDefaultNN();
+      success = 1;
+    }
+
+    if (success)
+      printf("info string set EvalFile to value %s\n", path);
+  } else if (!strncmp(in, "setoption name DebugModules value ", 34)) {
+    char* val = in + 34;
+    NexusDebugSetFromUciString(val);
+    NexusDebugEnabledRuntime = 1;
+    if (NexusBuildHasDebug())
+      printf("info string set DebugModules to value %s (debug build active)\n", val);
+    else
+      printf("info string set DebugModules to value %s (WARNING: build was compiled without NEXUS_DEBUG; "
+             "use 'make debug' for actual debug output)\n", val);
+  } else if (!strncmp(in, "setoption name ExplainMode value ", 33)) {
+    char opt[6];
+    sscanf(in, "%*s %*s %*s %*s %5s", opt);
+    NexusExplainEnabled = !strncmp(opt, "true", 4);
+    if (NexusExplainEnabled && !NexusBuildHasSummary())
+      printf("info string ExplainMode=true accepted but build was compiled without NEXUS_SUMMARY; "
+             "use 'make profile' or 'make debug' for actual explain output\n");
+    else
+      printf("info string set ExplainMode to value %s\n", NexusExplainEnabled ? "true" : "false");
+  } else if (!strncmp(in, "setoption name ProfileReport value ", 35)) {
+    char opt[6];
+    sscanf(in, "%*s %*s %*s %*s %5s", opt);
+    NexusProfileReportEnabled = !strncmp(opt, "true", 4);
+    if (NexusProfileReportEnabled && !NexusBuildHasProfile())
+      printf("info string ProfileReport=true accepted but build was compiled without NEXUS_PROFILE; "
+             "use 'make profile' or 'make debug' for actual profile output\n");
+    else
+      printf("info string set ProfileReport to value %s\n", NexusProfileReportEnabled ? "true" : "false");
+  } else
+    printf("Unknown command: %s \n", in);
+}
+
 void UCILoop() {
   static char in[8192];
 
-  Board board;
+  // Use static Board to avoid stack overflow (Board is ~35KB)
+  static Board board;
+  // Allocate accumulators/refreshTable once, never free between UCILoop calls.
+  static int allocInitialized = 0;
+  if (!allocInitialized) {
+    board.accumulators = AlignedMalloc(sizeof(Accumulator) * (MAX_SEARCH_PLY + 1), 64);
+    board.refreshTable = AlignedMalloc(sizeof(AccumulatorKingState) * 2 * 2 * N_KING_BUCKETS, 64);
+    allocInitialized = 1;
+  }
+
   ParseFen(START_FEN, &board);
+
+  // Reset accumulator/refreshTable state (but keep the same allocation)
+  board.accumulators->correct[WHITE] = board.accumulators->correct[BLACK] = 0;
+  ResetRefreshTable(board.refreshTable);
 
   setbuf(stdout, NULL);
 
   Threads.searching = Threads.sleeping = 0;
 
   while (ReadLine(in)) {
-    if (in[0] == '\n')
-      continue;
-
-    if (!strncmp(in, "isready", 7)) {
-      printf("readyok\n");
-    } else if (!strncmp(in, "position", 8)) {
-      ParsePosition(in, &board);
-    } else if (!strncmp(in, "ucinewgame", 10)) {
-      ParsePosition("position startpos\n", &board);
-      TTClear();
-      SearchClear();
-    } else if (!strncmp(in, "go", 2)) {
-      ParseGo(in, &board);
-    } else if (!strncmp(in, "stop", 4)) {
-      if (Threads.searching) {
-        Threads.stop = 1;
-        pthread_mutex_lock(&Threads.lock);
-        if (Threads.sleeping)
-          ThreadWake(Threads.threads[0], THREAD_RESUME);
-        Threads.sleeping = 0;
-        pthread_mutex_unlock(&Threads.lock);
-      }
-    } else if (!strncmp(in, "quit", 4)) {
-      if (Threads.searching) {
-        Threads.stop = 1;
-        pthread_mutex_lock(&Threads.lock);
-        if (Threads.sleeping)
-          ThreadWake(Threads.threads[0], THREAD_RESUME);
-        Threads.sleeping = 0;
-        pthread_mutex_unlock(&Threads.lock);
-      }
+    HandleCommand(in, &board);
+    if (!strncmp(in, "quit", 4))
       break;
-    } else if (!strncmp(in, "uci", 3)) {
-      PrintUCIOptions();
-    } else if (!strncmp(in, "ponderhit", 9)) {
-      Threads.ponder = 0;
-      if (Threads.stopOnPonderHit)
-        Threads.stop = 1;
-      pthread_mutex_lock(&Threads.lock);
-      if (Threads.sleeping) {
-        Threads.stop = 1;
-        ThreadWake(Threads.threads[0], THREAD_RESUME);
-        Threads.sleeping = 0;
-      }
-      pthread_mutex_unlock(&Threads.lock);
-    } else if (!strncmp(in, "board", 5)) {
-      PrintBoard(&board);
-    } else if (!strncmp(in, "cycle", 5)) {
-      int cycle = HasCycle(&board, MAX_SEARCH_PLY);
-      printf(cycle ? "yes\n" : "no\n");
-    } else if (!strncmp(in, "perft", 5)) {
-      strtok(in, " ");
-      char* d   = strtok(NULL, " ") ?: "5";
-      char* fen = strtok(NULL, "\0") ?: START_FEN;
-
-      int depth = atoi(d);
-      ParseFen(fen, &board);
-
-      PerftTest(depth, &board);
-    } else if (!strncmp(in, "bench", 5)) {
-      strtok(in, " ");
-      char* d = strtok(NULL, " ") ?: "13";
-
-      int depth = atoi(d);
-      Bench(depth);
-    } else if (!strncmp(in, "threats", 7)) {
-      PrintBB(board.threatened);
-    } else if (!strncmp(in, "eval", 4)) {
-      EvaluateTrace(&board);
-    } else if (!strncmp(in, "see ", 4)) {
-      Move m = ParseMove(in + 4, &board);
-      if (m)
-        printf("info string SEE result: %d\n", SEE(&board, m, 0));
-      else
-        printf("info string Invalid move!\n");
-    } else if (!strncmp(in, "apply ", 6)) {
-      Move m = ParseMove(in + 6, &board);
-      if (m) {
-        MakeMoveUpdate(m, &board, 0);
-        PrintBoard(&board);
-      } else
-        printf("info string Invalid move!\n");
-    } else if (!strncmp(in, "setoption name Hash value ", 26)) {
-      int mb                  = GetOptionIntValue(in);
-      mb                      = Max(2, Min(HASH_MAX, mb));
-      uint64_t bytesAllocated = TTInit(mb);
-      uint64_t totalEntries   = BUCKET_SIZE * bytesAllocated / sizeof(TTBucket);
-      printf("info string set Hash to value %d (%" PRIu64 " bytes) (%" PRIu64 " entries)\n",
-             mb,
-             bytesAllocated,
-             totalEntries);
-    } else if (!strncmp(in, "setoption name Threads value ", 29)) {
-      int n = GetOptionIntValue(in);
-      ThreadsSetNumber(Max(1, Min(2048, n)));
-      printf("info string set Threads to value %d\n", Threads.count);
-    } else if (!strncmp(in, "setoption name SyzygyPath value ", 32)) {
-      int success = tb_init(in + 32);
-      if (success)
-        printf("info string set SyzygyPath to value %s\n", in + 32);
-      else
-        printf("info string FAILED!\n");
-    } else if (!strncmp(in, "setoption name MultiPV value ", 29)) {
-      int n = GetOptionIntValue(in);
-
-      MULTI_PV = Max(1, Min(256, n));
-      printf("info string set MultiPV to value %d\n", MULTI_PV);
-    } else if (!strncmp(in, "setoption name Ponder value ", 28)) {
-      char opt[6];
-      sscanf(in, "%*s %*s %*s %*s %5s", opt);
-
-      PONDER_ENABLED = !strncmp(opt, "true", 4);
-      printf("info string set Ponder to value %s\n", PONDER_ENABLED ? "true" : "false");
-    } else if (!strncmp(in, "setoption name UCI_ShowWDL value ", 33)) {
-      char opt[6];
-      sscanf(in, "%*s %*s %*s %*s %5s", opt);
-
-      SHOW_WDL = !strncmp(opt, "true", 4);
-      printf("info string set SHOW_WDL to value %s\n", SHOW_WDL ? "true" : "false");
-    } else if (!strncmp(in, "setoption name UCI_Chess960 value ", 34)) {
-      char opt[6];
-      sscanf(in, "%*s %*s %*s %*s %5s", opt);
-
-      CHESS_960 = !strncmp(opt, "true", 4);
-      printf("info string set UCI_Chess960 to value %s\n", CHESS_960 ? "true" : "false");
-      printf("info string Resetting board...\n");
-
-      ParsePosition("position startpos\n", &board);
-      TTClear();
-      SearchClear();
-    } else if (!strncmp(in, "setoption name MoveOverhead value ", 34)) {
-      MOVE_OVERHEAD = Min(10000, Max(0, GetOptionIntValue(in)));
-    } else if (!strncmp(in, "setoption name Contempt value ", 30)) {
-      CONTEMPT = Min(100, Max(-100, GetOptionIntValue(in)));
-    } else if (!strncmp(in, "setoption name EvalFile value ", 30)) {
-      char* path  = in + 30;
-      int success = 0;
-
-      if (strncmp(path, "<empty>", 7))
-        success = LoadNetwork(path);
-      else {
-        LoadDefaultNN();
-        success = 1;
-      }
-
-      if (success)
-        printf("info string set EvalFile to value %s\n", path);
-    } else if (!strncmp(in, "setoption name DebugModules value ", 34)) {
-      char* val = in + 34;
-      NexusDebugSetFromUciString(val);
-      NexusDebugEnabledRuntime = 1;
-      if (NexusBuildHasDebug())
-        printf("info string set DebugModules to value %s (debug build active)\n", val);
-      else
-        printf("info string set DebugModules to value %s (WARNING: build was compiled without NEXUS_DEBUG; "
-               "use 'make debug' for actual debug output)\n", val);
-    } else if (!strncmp(in, "setoption name ExplainMode value ", 33)) {
-      char opt[6];
-      sscanf(in, "%*s %*s %*s %*s %5s", opt);
-      NexusExplainEnabled = !strncmp(opt, "true", 4);
-      if (NexusExplainEnabled && !NexusBuildHasSummary())
-        printf("info string ExplainMode=true accepted but build was compiled without NEXUS_SUMMARY; "
-               "use 'make profile' or 'make debug' for actual explain output\n");
-      else
-        printf("info string set ExplainMode to value %s\n", NexusExplainEnabled ? "true" : "false");
-    } else if (!strncmp(in, "setoption name ProfileReport value ", 35)) {
-      char opt[6];
-      sscanf(in, "%*s %*s %*s %*s %5s", opt);
-      NexusProfileReportEnabled = !strncmp(opt, "true", 4);
-      if (NexusProfileReportEnabled && !NexusBuildHasProfile())
-        printf("info string ProfileReport=true accepted but build was compiled without NEXUS_PROFILE; "
-               "use 'make profile' or 'make debug' for actual profile output\n");
-      else
-        printf("info string set ProfileReport to value %s\n", NexusProfileReportEnabled ? "true" : "false");
-    } else
-      printf("Unknown command: %s \n", in);
   }
 
   if (Threads.searching)
     ThreadWaitUntilSleep(Threads.threads[0]);
 
   pthread_mutex_destroy(&Threads.lock);
+#ifndef __EMSCRIPTEN__
   ThreadsExit();
+#endif
 }
 
 int GetOptionIntValue(char* in) {
@@ -487,3 +518,121 @@ int GetOptionIntValue(char* in) {
 
   return n;
 }
+
+#ifdef __EMSCRIPTEN__
+// ---------------------------------------------------------------------------
+// Browser JS bridge (pthread-based pump).
+//
+// The engine lives in a Web Worker. JS queues UCI commands with
+// nexus_push_command() and drains them with nexus_pump(). Searches run on an
+// Emscripten pthread, so the command thread stays responsive and interactive
+// `stop`/`ponderhit` work between pumps.
+// ---------------------------------------------------------------------------
+
+#define NEXUS_CMD_BUF_SIZE 65536
+static char cmdBuffer[NEXUS_CMD_BUF_SIZE];
+static int cmdBufferLen = 0;
+
+static Board wasmBoard;
+static int wasmBoardReady = 0;
+static int wasmInitialized = 0;
+
+// JS calls this once to initialize the engine and prepare the start position.
+EMSCRIPTEN_KEEPALIVE
+int nexus_init() {
+  if (!wasmInitialized) {
+    SeedRandom(0);
+    InitZobristKeys();
+    InitPruningAndReductionTables();
+    InitAttacks();
+    InitCuckoo();
+    LoadDefaultNN();
+    ThreadsInit();
+    TTInit(16);
+    wasmInitialized = 1;
+  }
+
+  if (!wasmBoardReady) {
+    wasmBoard.accumulators = AlignedMalloc(sizeof(Accumulator) * (MAX_SEARCH_PLY + 1), 64);
+    wasmBoard.refreshTable = AlignedMalloc(sizeof(AccumulatorKingState) * 2 * 2 * N_KING_BUCKETS, 64);
+    wasmBoardReady = 1;
+  }
+
+  wasmBoard.accumulators->correct[WHITE] = wasmBoard.accumulators->correct[BLACK] = 0;
+  ResetRefreshTable(wasmBoard.refreshTable);
+
+  ParseFen(START_FEN, &wasmBoard);
+  setbuf(stdout, NULL);
+
+  Threads.searching = Threads.sleeping = 0;
+  cmdBufferLen = 0;
+
+  return 1;
+}
+
+// JS calls this to queue a UCI command line (processed on the next pump).
+EMSCRIPTEN_KEEPALIVE
+int nexus_push_command(const char* cmd) {
+  int len = strlen(cmd);
+  if (len <= 0) return 0;
+  if (cmdBufferLen + len + 1 >= NEXUS_CMD_BUF_SIZE) return 0;
+
+  memcpy(cmdBuffer + cmdBufferLen, cmd, len);
+  cmdBufferLen += len;
+  cmdBuffer[cmdBufferLen++] = '\n';
+  cmdBuffer[cmdBufferLen] = '\0';
+
+  return 1;
+}
+
+// Drain all buffered commands. Returns the number processed. Never blocks:
+// `go` only wakes the search thread and returns immediately.
+EMSCRIPTEN_KEEPALIVE
+int nexus_pump() {
+  if (!wasmInitialized) return 0;
+
+  int processed = 0;
+  char in[8192];
+
+  while (cmdBufferLen > 0) {
+    int i = 0;
+    while (i < cmdBufferLen && cmdBuffer[i] != '\n' && i < 8191) {
+      in[i] = cmdBuffer[i];
+      i++;
+    }
+
+    int consumed = i;
+    if (consumed < cmdBufferLen) consumed++; // skip newline
+
+    memmove(cmdBuffer, cmdBuffer + consumed, cmdBufferLen - consumed);
+    cmdBufferLen -= consumed;
+
+    in[i] = '\0';
+    HandleCommand(in, &wasmBoard);
+    processed++;
+  }
+
+  return processed;
+}
+
+// Stop any running search and shut down worker threads.
+EMSCRIPTEN_KEEPALIVE
+int nexus_destroy() {
+  if (Threads.searching) {
+    Threads.stop = 1;
+    pthread_mutex_lock(&Threads.lock);
+    if (Threads.sleeping)
+      ThreadWake(Threads.threads[0], THREAD_RESUME);
+    Threads.sleeping = 0;
+    pthread_mutex_unlock(&Threads.lock);
+  }
+
+  if (wasmInitialized) {
+    ThreadWaitUntilSleep(Threads.threads[0]);
+    ThreadsExit();
+    wasmInitialized = 0;
+  }
+
+  return 1;
+}
+#endif
