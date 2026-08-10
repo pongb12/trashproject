@@ -108,9 +108,11 @@ void StartSearch(Board* board, uint8_t ponder) {
   SetupOtherThreads(board);
 
   Threads.searching = 1;
-#ifdef __EMSCRIPTEN__
+#if defined(__EMSCRIPTEN__) && !defined(__EMSCRIPTEN_PTHREADS__)
+  // Single-threaded WASM: call MainSearch directly (blocks until done)
   MainSearch();
 #else
+  // Native or pthreads WASM: wake main thread to start searching
   ThreadWake(Threads.threads[0], THREAD_SEARCH);
 #endif
 }
@@ -223,8 +225,9 @@ void MainSearch() {
     printf(" ponder %s", MoveToStr(ponderMove, board));
   printf("\n");
 
-  // WASM: clear searching flag (normally done by ThreadWaitUntilSleep)
-#ifdef __EMSCRIPTEN__
+  // Single-threaded WASM: clear searching flag (normally done by ThreadWaitUntilSleep)
+  // pthreads WASM and native: handled by ThreadWaitUntilSleep in idle loop
+#if defined(__EMSCRIPTEN__) && !defined(__EMSCRIPTEN_PTHREADS__)
   Threads.searching = 0;
   Threads.sleeping = 1;
 #endif

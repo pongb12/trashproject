@@ -16,7 +16,10 @@
 
 #include "thread.h"
 
-#ifndef __EMSCRIPTEN__
+// When building with pthreads (-s USE_PTHREADS=1), Emscripten defines __EMSCRIPTEN_PTHREADS__.
+// In that case we use real pthreads (like native build). Only single-threaded WASM
+// (no pthreads) uses the no-op stubs.
+#if !defined(__EMSCRIPTEN__) || defined(__EMSCRIPTEN_PTHREADS__)
 #include <pthread.h>
 #endif
 #include <stddef.h>
@@ -39,10 +42,12 @@ ThreadPool Threads;
 
 // Block until requested thread is sleeping
 void ThreadWaitUntilSleep(ThreadData* thread) {
-#ifdef __EMSCRIPTEN__
+#if defined(__EMSCRIPTEN__) && !defined(__EMSCRIPTEN_PTHREADS__)
+  // Single-threaded WASM: no-op stub
   (void)thread;
   Threads.searching = 0;
 #else
+  // Native or pthreads WASM: real pthread synchronization
   pthread_mutex_lock(&thread->mutex);
 
   while (thread->action != THREAD_SLEEP)
@@ -57,9 +62,11 @@ void ThreadWaitUntilSleep(ThreadData* thread) {
 
 // Block thread until on condition
 void ThreadWait(ThreadData* thread, atomic_uchar* cond) {
-#ifdef __EMSCRIPTEN__
+#if defined(__EMSCRIPTEN__) && !defined(__EMSCRIPTEN_PTHREADS__)
+  // Single-threaded WASM: no-op stub
   (void)thread; (void)cond;
 #else
+  // Native or pthreads WASM: real pthread synchronization
   pthread_mutex_lock(&thread->mutex);
 
   while (!atomic_load(cond))
@@ -71,9 +78,11 @@ void ThreadWait(ThreadData* thread, atomic_uchar* cond) {
 
 // Wake a thread up with an action
 void ThreadWake(ThreadData* thread, int action) {
-#ifdef __EMSCRIPTEN__
+#if defined(__EMSCRIPTEN__) && !defined(__EMSCRIPTEN_PTHREADS__)
+  // Single-threaded WASM: no-op stub
   (void)thread; (void)action;
 #else
+  // Native or pthreads WASM: real pthread wake
   pthread_mutex_lock(&thread->mutex);
 
   if (action != THREAD_RESUME)
@@ -83,6 +92,10 @@ void ThreadWake(ThreadData* thread, int action) {
   pthread_mutex_unlock(&thread->mutex);
 #endif
 }
+
+// Wrapper for pthread_create — converts void* arg to ThreadData*
+// Must be defined before ThreadInit which uses it
+static void* ThreadIdleWrapper(void* arg);
 
 // Idle loop that wakes into an action
 void ThreadIdle(ThreadData* thread) {
@@ -146,9 +159,25 @@ void* ThreadInit(void* arg) {
   pthread_cond_signal(&Threads.sleep);
   pthread_mutex_unlock(&Threads.mutex);
 
-  // In WASM, ThreadIdle is not needed — search runs directly
+#if defined(__EMSCRIPTEN__) && !defined(__EMSCRIPTEN_PTHREADS__)
+  // Single-threaded WASM: ThreadIdle not needed — search runs directly
   // ThreadIdle(thread);
+#else
+  // Native or pthreads WASM: start ThreadIdle in a real pthread
+  pthread_create(&thread->nativeThread, NULL, ThreadIdleWrapper, thread);
+  // Wait for thread to signal it's ready (init complete)
+  pthread_mutex_lock(&Threads.mutex);
+  while (Threads.init)
+    pthread_cond_wait(&Threads.sleep, &Threads.mutex);
+  pthread_mutex_unlock(&Threads.mutex);
+#endif
 
+  return NULL;
+}
+
+// Wrapper for pthread_create — converts void* arg to ThreadData*
+static void* ThreadIdleWrapper(void* arg) {
+  ThreadIdle((ThreadData*) arg);
   return NULL;
 }
 
