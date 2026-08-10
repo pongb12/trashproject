@@ -516,8 +516,10 @@ void UCILoop() {
   if (Threads.searching)
     ThreadWaitUntilSleep(Threads.threads[0]);
 
-  // pthread_mutex_destroy is a no-op in WASM
-  ThreadsExit();
+  // WASM: KHÔNG gọi ThreadsExit() ở cuối UCILoop — nó frees Threads.threads[0]
+  // và set Threads.count=0. Lần gọi UCILoop tiếp theo, NodesSearched() sẽ
+  // return 0 vì loop `for (i=0; i<0; i++)` → output 'nodes 0 nps 0' sai.
+  // ThreadsExit();
 }
 
 int GetOptionIntValue(char* in) {
